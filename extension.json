@@ -12,7 +12,7 @@
         {
             "os": "windows",
             "arch": "amd64",
-            "path": "dist/threadless-inject.o"
+            "path": "threadless-inject.o"
         }
     ],
     "arguments": [
