@@ -3,66 +3,63 @@ name: Release
 on:
   push:
     tags: ["v[0-9]+.[0-9]+.[0-9]+"]
-    branches: ["main"]
+    branches: [master]
 
 jobs:
-
-  linux-windows-build:
-    name: mingw32-gcc Build
+  bof-build:
+    name: Build and publish tagged release
     if: startsWith( github.ref, 'refs/tags/v')
-    runs-on: windows-2019
-    timeout-minutes: 45
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
     steps:
+      - name: OS Packages
+        run: |
+          sudo apt-get update --fix-missing && sudo apt-get -y install \
+          git build-essential zlib1g zlib1g-dev wget zip unzip \
+          mingw-w64 binutils-mingw-w64 g++-mingw-w64 gcc-multilib jq
 
-    - name: Add msbuild to PATH
-      uses: microsoft/setup-msbuild@v1.1
-      
-    - name: Set up MinGW
-      uses: egor-tensin/setup-mingw@v2.2.0
-      with:
-        platform: x64
-        version: 12.2.0 # https://github.com/egor-tensin/setup-mingw/issues/17
-  
-    - name: Check out code
-      uses: actions/checkout@v2
+      - name: Minisign
+        run: |
+          MINISIGN_TMP=`mktemp -d`
+          cd $MINISIGN_TMP
+          wget https://github.com/aead/minisign/releases/download/v0.2.0/minisign-linux-amd64.tar.gz
+          tar xvf minisign-linux-amd64.tar.gz
+          mv ./minisign ~/minisign
+          touch ~/minisign.key && chmod 600 ~/minisign.key
+          echo -e "${{ secrets.MINISIGN_PRIVATE_KEY }}" > ~/minisign.key
+          ls -l ~/
+          realpath ~/
 
-    - name: Git Fetch Tags
-      run: git fetch --prune --unshallow --tags -f
+      - name: Check out code
+        uses: actions/checkout@v2
 
-    - name: Download Tools
-      run: |
-        [Net.ServicePointManager]::SecurityProtocol = [Net.SecurityProtocolType]::Tls12
-        Invoke-WebRequest -Uri https://github.com/stedolan/jq/releases/download/jq-1.6/jq-win64.exe -OutFile jq.exe
-        Invoke-WebRequest -Uri https://github.com/moloch--/minisign/releases/download/v0.2.1/minisign.exe -OutFile minisign.exe
+      - name: Git Fetch Tags
+        run: git fetch --prune --unshallow --tags -f
 
-    - name: Compile
-      run: |
-        mkdir artifacts
-        make
-        cp .\dist\threadless-inject.o .\artifacts
-        cp .\LICENSE .\artifacts
+      - name: Compile
+        run: |
+          mkdir artifacts
+          make
+          cp ./dist/threadless-inject.o ./artifacts
 
-    - name: Build Package
-      # Powershell is utter fucking trash.
-      run: |
-        $Version = git.exe describe --tags --abbrev=0
-        Get-Content -Path extension.json | .\jq.exe --arg ver "$Version" '.version |= $ver' > .\artifacts\extension.json
-        cd artifacts
-        tar.exe -czvf ..\threadless-inject.tar.gz .
+      - name: Build Package
+        run: |
+          mkdir packages
+          cp ./LICENSE ./artifacts
+          VERSION=$(git describe --tags --abbrev=0)
+          cat extension.json | jq ".version |= \"$VERSION\"" > ./artifacts/extension.json
+          cd artifacts
+          MANIFEST=$(cat extension.json | base64 -w 0)
+          COMMAND_NAME=$(cat extension.json | jq -r .command_name)
+          tar czvf ../packages/$COMMAND_NAME.tar.gz .
+          cd ../packages
+          bash -c "echo \"\" | /home/runner/minisign -s /home/runner/minisign.key -S -m ./$COMMAND_NAME.tar.gz -t \"$MANIFEST\" -x $COMMAND_NAME.minisig"
 
-    - name: Sign Package
-      run: |
-        Write-Output "${{ secrets.MINISIGN_PRIVATE_KEY }}" > minisign.key
-        $Content1 = Get-Content -Path ./artifacts/extension.json
-        $Bytes = [System.Text.Encoding]::UTF8.GetBytes($Content1)
-        $Encoded = [System.Convert]::ToBase64String($Bytes)
-        .\minisign.exe -s minisign.key -S -m threadless-inject.tar.gz -t "$Encoded" -x threadless-inject.minisig
-
-    - name: "Publish Release"
-      uses: "marvinpinto/action-automatic-releases@latest"
-      with:
-        repo_token: "${{ secrets.GITHUB_TOKEN }}"
-        prerelease: false
-        files: |
-          threadless-inject.minisig
-          threadless-inject.tar.gz
+      - name: "Publish Release"
+        uses: "marvinpinto/action-automatic-releases@latest"
+        with:
+          repo_token: "${{ secrets.GITHUB_TOKEN }}"
+          prerelease: false
+          files: |
+            ./packages/*.tar.gz
+            ./packages/*.minisig
